@@ -1,0 +1,70 @@
+{
+  "_metadata": {
+    "major_version": 2,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "SobatHQ",
+    "description": "Your AI Chief of Staff for modern work. Prioritizes emails, summarizes updates, tracks workflows, and suggests next actions — all with your approval.",
+    "background_color": "#4c6ef5",
+    "long_description": "SobatHQ connects to your Gmail, Calendar, Slack, Drive, and Sheets to understand your work across applications.\n\nIt proactively:\n• Prioritizes emails\n• Summarizes important updates\n• Tracks ongoing workflows\n• Drafts responses\n• Prepares reports\n• Remembers your preferences\n• Suggests the next best actions\n\nEvery important action is presented for approval before execution, keeping you in control.\n\nAsk Sobat: \"What's important today?\" and get a daily briefing with suggested actions."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "Sobat",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/sobat",
+        "description": "Ask SobatHQ what's important or request an action",
+        "usage_hint": "[what's important today | help | status]",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "http://localhost:3001/api/auth/slack/callback",
+      "https://your-domain.com/api/auth/slack/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read"
+      ],
+      "user": [
+        "channels:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "http://localhost:3002/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "http://localhost:3002/slack/interactions"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

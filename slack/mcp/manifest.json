@@ -1,0 +1,120 @@
+{
+  "name": "sobathq",
+  "version": "0.1.0",
+  "description": "SobatHQ MCP server — exposes Gmail, Calendar, Drive, Sheets, and Slack tools to AI agents",
+  "author": "SobatHQ",
+  "license": "MIT",
+  "mcpVersion": "2024-11-05",
+  "server": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["dist/mcp-server.js"]
+  },
+  "capabilities": {
+    "tools": true,
+    "resources": true,
+    "prompts": true
+  },
+  "tools": [
+    {
+      "name": "gmail_list_unread",
+      "description": "List unread emails and prioritize inbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "maxResults": { "type": "number", "description": "Maximum emails to return", "default": 20 }
+        }
+      }
+    },
+    {
+      "name": "gmail_draft_reply",
+      "description": "Draft an email reply (requires user approval before sending)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string", "description": "Gmail message ID to reply to" },
+          "body": { "type": "string", "description": "Optional draft body override" }
+        },
+        "required": ["messageId"]
+      }
+    },
+    {
+      "name": "calendar_list_today",
+      "description": "List today's calendar events and meetings",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "calendar_create_event",
+      "description": "Create a calendar event (requires user approval)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "start": { "type": "string", "format": "date-time" },
+          "end": { "type": "string", "format": "date-time" }
+        },
+        "required": ["title", "start", "end"]
+      }
+    },
+    {
+      "name": "drive_list_recent",
+      "description": "List recently modified files in Google Drive",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sheets_get_report",
+      "description": "Get a prepared report from Google Sheets",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "spreadsheetId": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "slack_send_message",
+      "description": "Send a Slack message (requires user approval)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channel": { "type": "string" },
+          "text": { "type": "string" }
+        },
+        "required": ["channel", "text"]
+      }
+    },
+    {
+      "name": "sobat_daily_briefing",
+      "description": "Get SobatHQ daily briefing — emails, meetings, follow-ups, and suggested actions",
+      "inputSchema": { "type": "object", "properties": {} }
+    }
+  ],
+  "resources": [
+    {
+      "uri": "sobathq://preferences",
+      "name": "User Preferences",
+      "description": "User work preferences and custom rules remembered by SobatHQ",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "sobathq://approval-queue",
+      "name": "Approval Queue",
+      "description": "Pending actions awaiting user approval",
+      "mimeType": "application/json"
+    }
+  ],
+  "prompts": [
+    {
+      "name": "daily_briefing",
+      "description": "Generate a daily work briefing in SobatHQ format",
+      "arguments": []
+    },
+    {
+      "name": "draft_email_reply",
+      "description": "Draft a professional email reply for user approval",
+      "arguments": [
+        { "name": "context", "description": "Email thread context", "required": true }
+      ]
+    }
+  ]
+}
