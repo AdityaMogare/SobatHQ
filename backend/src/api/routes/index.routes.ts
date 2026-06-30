@@ -3,7 +3,6 @@ import { getAppContext } from '../../app/context.js';
 import { asyncHandler, successResponse } from '../middleware/error-handler.js';
 import { createOrchestrator } from '../../agents/coordinator.js';
 import type { AgentState } from '../../types/index.js';
-import { env } from '../../config/env.js';
 
 export const agentsRouter = Router();
 
@@ -60,75 +59,15 @@ toolsRouter.post(
 export const healthRouter = Router();
 
 healthRouter.get('/', (_req, res) => {
-  const { taskQueue } = getAppContext();
+  const { taskQueue, qwen } = getAppContext();
   res.json({
     status: 'ok',
     service: 'sobathq-backend',
-    version: '0.1.0',
+    version: '0.2.0',
     timestamp: new Date().toISOString(),
     queue: taskQueue.getStats(),
+    integrations: {
+      qwen: qwen.isConfigured(),
+    },
   });
 });
-
-export const authRouter = Router();
-
-authRouter.get('/google', (_req, res) => {
-  if (!env.GOOGLE_CLIENT_ID) {
-    res.status(503).json({ success: false, error: 'Google OAuth not configured' });
-    return;
-  }
-
-  const scopes = [
-    'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.compose',
-    'https://www.googleapis.com/auth/calendar.readonly',
-    'https://www.googleapis.com/auth/drive.readonly',
-    'https://www.googleapis.com/auth/spreadsheets.readonly',
-  ];
-
-  const params = new URLSearchParams({
-    client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: env.GOOGLE_REDIRECT_URI ?? '',
-    response_type: 'code',
-    scope: scopes.join(' '),
-    access_type: 'offline',
-    prompt: 'consent',
-  });
-
-  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
-});
-
-authRouter.get('/google/callback', asyncHandler(async (req, res) => {
-  const { code } = req.query;
-  if (!code) {
-    res.status(400).json({ success: false, error: 'Authorization code missing' });
-    return;
-  }
-  // TODO: Exchange code for tokens via googleapis
-  successResponse(res, { message: 'Google OAuth callback received', code });
-}));
-
-authRouter.get('/slack', (_req, res) => {
-  if (!env.SLACK_CLIENT_ID) {
-    res.status(503).json({ success: false, error: 'Slack OAuth not configured' });
-    return;
-  }
-
-  const params = new URLSearchParams({
-    client_id: env.SLACK_CLIENT_ID,
-    scope: 'channels:read,channels:history,chat:write,users:read,im:history,im:write',
-    redirect_uri: env.SLACK_REDIRECT_URI ?? '',
-  });
-
-  res.redirect(`https://slack.com/oauth/v2/authorize?${params}`);
-});
-
-authRouter.get('/slack/callback', asyncHandler(async (req, res) => {
-  const { code } = req.query;
-  if (!code) {
-    res.status(400).json({ success: false, error: 'Authorization code missing' });
-    return;
-  }
-  // TODO: Exchange code for tokens via Slack API
-  successResponse(res, { message: 'Slack OAuth callback received', code });
-}));
