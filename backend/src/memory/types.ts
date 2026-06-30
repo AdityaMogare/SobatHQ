@@ -18,9 +18,12 @@ export function buildKey(namespace: string, ...parts: string[]): string {
 export const MemoryNamespaces = {
   USER_PREFS: 'user:prefs',
   USER_TOKENS: 'user:tokens',
+  USER: 'user',
   AGENT_STATE: 'agent:state',
   TASK: 'task',
   APPROVAL: 'approval',
   SESSION: 'session',
+  OAUTH_STATE: 'oauth:state',
+  API_KEY: 'apikey',
   CACHE: 'cache',
 } as const;

@@ -13,6 +13,18 @@ import { createOrchestrator } from './agents/coordinator.js';
 import { setAppContext, emitWsEvent } from './app/context.js';
 import { logger } from './utils/logger.js';
 import type { OrchestratorRequest } from './types/index.js';
+import { TokenStore } from './auth/token-store.js';
+import { SessionService } from './auth/session.service.js';
+import { ApiKeyService } from './auth/api-key.service.js';
+import { OAuthStateService } from './auth/oauth-state.service.js';
+import { GoogleOAuthService } from './auth/google.oauth.js';
+import { SlackOAuthService } from './auth/slack.oauth.js';
+import { QwenClient } from './integrations/qwen/client.js';
+import { GmailService } from './integrations/google/gmail.service.js';
+import { CalendarService } from './integrations/google/calendar.service.js';
+import { DriveService } from './integrations/google/drive.service.js';
+import { SheetsService } from './integrations/google/sheets.service.js';
+import { SlackIntegrationService } from './integrations/slack/slack.service.js';
 
 async function bootstrap(): Promise<void> {
   const memoryStore = await createMemoryStore(env.REDIS_URL);
@@ -20,6 +32,20 @@ async function bootstrap(): Promise<void> {
   const taskService = new TaskService(memoryStore);
   const approvalService = new ApprovalService(memoryStore);
   const orchestrator = createOrchestrator();
+
+  // Auth & integrations
+  const tokenStore = new TokenStore(memoryStore);
+  const sessions = new SessionService(memoryStore);
+  const apiKeys = new ApiKeyService(memoryStore);
+  const oauthState = new OAuthStateService(memoryStore);
+  const googleOAuth = new GoogleOAuthService(tokenStore, oauthState, sessions);
+  const slackOAuth = new SlackOAuthService(tokenStore, oauthState, sessions);
+  const qwen = new QwenClient();
+  const gmailService = new GmailService(googleOAuth);
+  const calendarService = new CalendarService(googleOAuth);
+  const driveService = new DriveService(googleOAuth);
+  const sheetsService = new SheetsService(googleOAuth);
+  const slackIntegration = new SlackIntegrationService(slackOAuth);
 
   const app = createApp();
   const httpServer = createServer(app);
@@ -36,11 +62,22 @@ async function bootstrap(): Promise<void> {
     taskQueue,
     toolRegistry,
     orchestrator,
+    tokenStore,
+    sessions,
+    apiKeys,
+    oauthState,
+    googleOAuth,
+    slackOAuth,
+    qwen,
+    gmailService,
+    calendarService,
+    driveService,
+    sheetsService,
+    slackIntegration,
     io,
     httpServer,
   });
 
-  // Register queue handlers
   taskQueue.registerHandler('orchestrate', async (job) => {
     const payload = job.payload as unknown as OrchestratorRequest;
     emitWsEvent('orchestrator:progress', {
@@ -63,7 +100,6 @@ async function bootstrap(): Promise<void> {
     return result;
   });
 
-  // WebSocket connection handling
   io.on('connection', (socket) => {
     logger.info({ socketId: socket.id }, 'Client connected');
 
@@ -77,7 +113,6 @@ async function bootstrap(): Promise<void> {
     });
   });
 
-  // Seed demo approvals for dashboard
   await seedDemoData(taskService, approvalService);
 
   httpServer.listen(env.PORT, () => {
@@ -86,6 +121,9 @@ async function bootstrap(): Promise<void> {
         port: env.PORT,
         env: env.NODE_ENV,
         redis: !!env.REDIS_URL,
+        qwen: qwen.isConfigured(),
+        googleOAuth: !!env.GOOGLE_CLIENT_ID,
+        slackOAuth: !!env.SLACK_CLIENT_ID,
       },
       'SobatHQ backend started',
     );
