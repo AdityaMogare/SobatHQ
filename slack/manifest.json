@@ -55,6 +55,7 @@
     "event_subscriptions": {
       "request_url": "http://localhost:3002/slack/events",
       "bot_events": [
+        "app_home_opened",
         "app_mention",
         "message.im"
       ]
