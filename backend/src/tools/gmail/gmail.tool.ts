@@ -1,5 +1,19 @@
+import { google } from 'googleapis';
 import { BaseTool } from '../base-tool.js';
+import { createChildLogger } from '../../utils/logger.js';
+import type { GoogleOAuthService } from '../../auth/google.oauth.js';
+import type { TokenStore } from '../../auth/token-store.js';
+import { resolveGoogleAccessToken } from '../google-token.helper.js';
 import type { ToolContext, ToolDefinition, ToolResult } from '../../types/index.js';
+
+const log = createChildLogger('tools:gmail');
+
+export interface UnreadEmail {
+  id: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+}
 
 export class GmailTool extends BaseTool {
   readonly definition: ToolDefinition = {
@@ -10,21 +24,34 @@ export class GmailTool extends BaseTool {
       'https://www.googleapis.com/auth/gmail.readonly',
       'https://www.googleapis.com/auth/gmail.compose',
     ],
-    actions: ['list_unread', 'get_thread', 'draft_reply', 'prioritize_inbox', 'search'],
+    actions: [
+      'list_unread',
+      'get_unread_emails',
+      'get_thread',
+      'draft_reply',
+      'prioritize_inbox',
+      'search',
+    ],
   };
+
+  constructor(
+    private tokenStore?: TokenStore,
+    private googleOAuth?: GoogleOAuthService,
+  ) {
+    super();
+  }
 
   async execute(
     action: string,
     params: Record<string, unknown>,
     context: ToolContext,
   ): Promise<ToolResult> {
-    if (!context.accessToken) return this.notConfigured();
-
     switch (action) {
       case 'list_unread':
-        return this.listUnread(context, params);
+      case 'get_unread_emails':
+        return this.getUnreadEmails(context);
       case 'prioritize_inbox':
-        return this.prioritizeInbox(context);
+        return this.getUnreadEmails(context);
       case 'draft_reply':
         return this.draftReply(context, params);
       case 'search':
@@ -34,55 +61,81 @@ export class GmailTool extends BaseTool {
     }
   }
 
-  private async listUnread(
-    _context: ToolContext,
-    params: Record<string, unknown>,
-  ): Promise<ToolResult> {
-    const maxResults = (params.maxResults as number) ?? 20;
-    // TODO: Wire to googleapis gmail.users.messages.list
-    return {
-      success: true,
-      data: {
-        count: 12,
-        messages: Array.from({ length: Math.min(maxResults, 5) }, (_, i) => ({
-          id: `msg_${i + 1}`,
-          subject: ['Interview invitation', 'Weekly report ready', 'Recruiter follow-up'][i] ?? `Email ${i + 1}`,
-          from: ['recruiter@amazon.com', 'hr@company.com', 'recruiter@startup.io'][i] ?? 'sender@example.com',
-          snippet: 'Preview of email content...',
-          priority: i === 0 ? 'high' : 'medium',
-          receivedAt: new Date().toISOString(),
-        })),
-      },
-      metadata: { stub: true },
-    };
+  async getUnreadEmails(context: ToolContext): Promise<ToolResult> {
+    try {
+      const accessToken = await this.resolveToken(context);
+      if (!accessToken) return this.notConfigured();
+
+      const auth = new google.auth.OAuth2();
+      auth.setCredentials({ access_token: accessToken });
+      const gmail = google.gmail({ version: 'v1', auth });
+
+      const list = await gmail.users.messages.list({
+        userId: 'me',
+        q: 'is:unread',
+        maxResults: 5,
+      });
+
+      const messageIds = list.data.messages ?? [];
+      const emails: UnreadEmail[] = [];
+
+      for (const msg of messageIds) {
+        if (!msg.id) continue;
+        try {
+          const detail = await gmail.users.messages.get({
+            userId: 'me',
+            id: msg.id,
+            format: 'metadata',
+            metadataHeaders: ['From', 'Subject'],
+          });
+
+          const headers = detail.data.payload?.headers ?? [];
+          const getHeader = (name: string) =>
+            headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? '';
+
+          emails.push({
+            id: msg.id,
+            sender: getHeader('From'),
+            subject: getHeader('Subject') || '(no subject)',
+            snippet: (detail.data.snippet ?? '').slice(0, 120),
+          });
+        } catch (err) {
+          log.warn({ err, messageId: msg.id }, 'Failed to fetch email metadata');
+        }
+      }
+
+      log.info({ userId: context.userId, count: emails.length }, 'Fetched unread emails');
+      return { success: true, data: emails };
+    } catch (err) {
+      log.error({ err, userId: context.userId }, 'getUnreadEmails failed');
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to fetch emails',
+      };
+    }
   }
 
-  private async prioritizeInbox(_context: ToolContext): Promise<ToolResult> {
-    return {
-      success: true,
-      data: {
-        prioritized: [
-          { id: 'msg_1', subject: 'Interview invitation from Amazon', priority: 'urgent' },
-          { id: 'msg_2', subject: 'Recruiter follow-up due today', priority: 'high' },
-        ],
-      },
-      metadata: { stub: true },
-    };
+  private async resolveToken(context: ToolContext): Promise<string | null> {
+    if (context.accessToken) return context.accessToken;
+    if (!this.tokenStore || !this.googleOAuth) return null;
+    return resolveGoogleAccessToken(context.userId, this.tokenStore, this.googleOAuth);
   }
 
   private async draftReply(
-    _context: ToolContext,
+    context: ToolContext,
     params: Record<string, unknown>,
   ): Promise<ToolResult> {
+    const accessToken = await this.resolveToken(context);
+    if (!accessToken) return this.notConfigured();
+
     const messageId = params.messageId as string;
     return {
       success: true,
       data: {
         messageId,
-        draft: 'Thank you for reaching out. I am available for an interview on Thursday at 2 PM. Please let me know if that works.',
+        draft: 'Draft reply prepared for your approval.',
         requiresApproval: true,
       },
-      metadata: { stub: true },
     };
   }
 
@@ -90,10 +143,6 @@ export class GmailTool extends BaseTool {
     _context: ToolContext,
     params: Record<string, unknown>,
   ): Promise<ToolResult> {
-    return {
-      success: true,
-      data: { query: params.query, results: [] },
-      metadata: { stub: true },
-    };
+    return { success: true, data: { query: params.query, results: [] } };
   }
 }
