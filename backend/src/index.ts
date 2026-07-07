@@ -8,7 +8,7 @@ import { PreferencesService } from './memory/preferences.js';
 import { TaskService } from './services/task.service.js';
 import { ApprovalService } from './services/approval.service.js';
 import { taskQueue } from './queue/task-queue.js';
-import { toolRegistry } from './tools/registry.js';
+import { createToolRegistry } from './tools/registry.js';
 import { createOrchestrator } from './agents/coordinator.js';
 import { setAppContext, emitWsEvent } from './app/context.js';
 import { logger } from './utils/logger.js';
@@ -31,7 +31,6 @@ async function bootstrap(): Promise<void> {
   const preferences = new PreferencesService(memoryStore);
   const taskService = new TaskService(memoryStore);
   const approvalService = new ApprovalService(memoryStore);
-  const orchestrator = createOrchestrator();
 
   // Auth & integrations
   const tokenStore = new TokenStore(memoryStore);
@@ -41,6 +40,8 @@ async function bootstrap(): Promise<void> {
   const googleOAuth = new GoogleOAuthService(tokenStore, oauthState, sessions);
   const slackOAuth = new SlackOAuthService(tokenStore, oauthState, sessions);
   const qwen = new QwenClient();
+  const toolRegistry = createToolRegistry(tokenStore, googleOAuth);
+  const orchestrator = createOrchestrator({ qwen, toolRegistry });
   const gmailService = new GmailService(googleOAuth);
   const calendarService = new CalendarService(googleOAuth);
   const driveService = new DriveService(googleOAuth);

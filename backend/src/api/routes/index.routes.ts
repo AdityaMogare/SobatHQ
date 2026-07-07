@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { getAppContext } from '../../app/context.js';
 import { asyncHandler, successResponse } from '../middleware/error-handler.js';
-import { createOrchestrator } from '../../agents/coordinator.js';
 import type { AgentState } from '../../types/index.js';
 
 export const agentsRouter = Router();
@@ -9,7 +8,8 @@ export const agentsRouter = Router();
 agentsRouter.get(
   '/',
   asyncHandler(async (_req, res) => {
-    const coordinator = createOrchestrator();
+    const { orchestrator } = getAppContext();
+    const coordinator = orchestrator;
     const agents: AgentState[] = [
       coordinator.getState(),
       ...Array.from({ length: 5 }, (_, i) => {

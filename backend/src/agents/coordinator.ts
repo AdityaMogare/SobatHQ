@@ -1,6 +1,12 @@
 import { BaseAgent } from './base-agent.js';
 import { createChildLogger } from '../utils/logger.js';
-import { toolRegistry } from '../tools/registry.js';
+import type { QwenClient } from '../integrations/qwen/client.js';
+import {
+  runQwenOrchestrationLoop,
+  buildBriefingFromToolResults,
+  generateRequestId,
+} from './qwen-loop.js';
+import type { ToolRegistry } from '../tools/registry.js';
 import type {
   AgentRole,
   BriefingItem,
@@ -15,9 +21,9 @@ import { v4 as uuidv4 } from 'uuid';
 
 const log = createChildLogger('agents:coordinator');
 
-interface SpecialistResult {
-  agent: AgentRole;
-  data: Record<string, unknown>;
+export interface OrchestratorDeps {
+  qwen: QwenClient;
+  toolRegistry: ToolRegistry;
 }
 
 export class CoordinatorAgent extends BaseAgent {
@@ -25,6 +31,10 @@ export class CoordinatorAgent extends BaseAgent {
   readonly name = 'Sobat Coordinator';
 
   private specialists = new Map<AgentRole, BaseAgent>();
+
+  constructor(private deps: OrchestratorDeps) {
+    super();
+  }
 
   registerSpecialist(agent: BaseAgent): void {
     this.specialists.set(agent.role, agent);
@@ -37,47 +47,58 @@ export class CoordinatorAgent extends BaseAgent {
   }
 
   async orchestrate(request: OrchestratorRequest): Promise<OrchestratorResponse> {
-    const requestId = uuidv4();
+    const requestId = generateRequestId();
     this.setStatus('thinking', 'Analyzing request');
 
     log.info({ requestId, userId: request.userId, message: request.message }, 'Orchestration started');
 
-    const context: ToolContext = {
-      userId: request.userId,
-      accessToken: 'stub-token',
-    };
+    const context: ToolContext = { userId: request.userId };
 
     const isDailyBriefing =
       request.message.toLowerCase().includes('important') ||
       request.message.toLowerCase().includes('today') ||
-      request.message.toLowerCase().includes('briefing');
+      request.message.toLowerCase().includes('briefing') ||
+      request.message.toLowerCase().includes('sync');
 
     let briefing: DailyBriefing | undefined;
-    const suggestedActions: SuggestedAction[] = [];
+    let suggestedActions: SuggestedAction[] = [];
     const tasksCreated: string[] = [];
     const approvalsRequired: string[] = [];
+    let summary: string;
 
-    if (isDailyBriefing) {
-      this.setStatus('working', 'Gathering daily briefing');
-      briefing = await this.buildDailyBriefing(context);
-      suggestedActions.push(
-        ...this.generateSuggestedActions(briefing),
-      );
+    if (this.deps.qwen.isConfigured()) {
+      this.setStatus('working', 'Running Qwen orchestration');
+      try {
+        const qwenResult = await runQwenOrchestrationLoop(
+          this.deps.qwen,
+          this.deps.toolRegistry,
+          request.userId,
+          request.message,
+        );
+
+        summary = qwenResult.summary;
+        const parsed = buildBriefingFromToolResults(qwenResult.toolResults);
+        briefing = this.buildBriefingFromLiveData(parsed.emails, parsed.events, parsed.emailCount);
+        suggestedActions = this.generateSuggestedActionsFromLiveData(briefing);
+      } catch (err) {
+        log.error({ err, userId: request.userId }, 'Qwen orchestration failed, falling back to live tools');
+        const fallback = await this.buildDailyBriefingLive(context);
+        briefing = fallback.briefing;
+        summary = fallback.summary;
+        suggestedActions = this.generateSuggestedActionsFromLiveData(briefing);
+      }
+    } else if (isDailyBriefing) {
+      this.setStatus('working', 'Gathering live briefing data');
+      const fallback = await this.buildDailyBriefingLive(context);
+      briefing = fallback.briefing;
+      summary = fallback.summary;
+      suggestedActions = this.generateSuggestedActionsFromLiveData(briefing);
     } else {
       this.setStatus('working', 'Processing request');
-      const intent = this.classifyIntent(request.message);
-      const results = await this.delegateToSpecialists(intent, context, request.message);
-      for (const result of results) {
-        if (result.data.taskId) tasksCreated.push(result.data.taskId as string);
-        if (result.data.approvalId) approvalsRequired.push(result.data.approvalId as string);
-      }
+      summary = `Processed your request: "${request.message.slice(0, 80)}"`;
     }
 
     this.setStatus('idle');
-
-    const summary = briefing
-      ? this.formatBriefingSummary(briefing)
-      : `Processed your request: "${request.message.slice(0, 80)}"`;
 
     return {
       requestId,
@@ -89,144 +110,87 @@ export class CoordinatorAgent extends BaseAgent {
     };
   }
 
-  private classifyIntent(message: string): AgentRole[] {
-    const lower = message.toLowerCase();
-    const agents: AgentRole[] = [];
-
-    if (lower.includes('email') || lower.includes('inbox') || lower.includes('reply')) {
-      agents.push('email');
-    }
-    if (lower.includes('calendar') || lower.includes('meeting') || lower.includes('schedule')) {
-      agents.push('calendar');
-    }
-    if (lower.includes('document') || lower.includes('drive') || lower.includes('file')) {
-      agents.push('documents');
-    }
-    if (lower.includes('report') || lower.includes('sheet')) {
-      agents.push('reporting');
-    }
-    if (lower.includes('slack') || lower.includes('message')) {
-      agents.push('slack');
-    }
-
-    return agents.length > 0 ? agents : ['email', 'calendar', 'documents'];
-  }
-
-  private async delegateToSpecialists(
-    roles: AgentRole[],
+  private async buildDailyBriefingLive(
     context: ToolContext,
-    message: string,
-  ): Promise<SpecialistResult[]> {
-    const results: SpecialistResult[] = [];
-
-    for (const role of roles) {
-      const specialist = this.specialists.get(role);
-      if (specialist) {
-        const data = await specialist.process({ context, message });
-        results.push({ agent: role, data });
-      } else {
-        const toolNames = toolRegistry.getToolsForAgent(role);
-        for (const toolName of toolNames) {
-          const result = await toolRegistry.execute(toolName, 'list_unread', {}, context);
-          results.push({ agent: role, data: { tool: toolName, result } });
-        }
-      }
-    }
-
-    return results;
-  }
-
-  private async buildDailyBriefing(context: ToolContext): Promise<DailyBriefing> {
-    const [emailResult, calendarResult, sheetsResult] = await Promise.all([
-      toolRegistry.execute('gmail', 'list_unread', {}, context),
-      toolRegistry.execute('calendar', 'list_today', {}, context),
-      toolRegistry.execute('sheets', 'get_report', {}, context),
+  ): Promise<{ briefing: DailyBriefing; summary: string }> {
+    const [emailResult, calendarResult] = await Promise.all([
+      this.deps.toolRegistry.execute('gmail', 'get_unread_emails', {}, context),
+      this.deps.toolRegistry.execute('calendar', 'get_calendar_events', {}, context),
     ]);
 
-    const emailData = emailResult.data as { count?: number; messages?: Array<{ subject: string; from: string }> } | undefined;
-    const calendarData = calendarResult.data as { events?: Array<{ title: string; updated?: boolean }> } | undefined;
-    const reportData = sheetsResult.data as { title?: string; status?: string } | undefined;
+    const emails = emailResult.success
+      ? (emailResult.data as Array<{ id: string; sender: string; subject: string; snippet: string }>)
+      : [];
+    const events = calendarResult.success
+      ? (calendarResult.data as Array<{ id: string; title: string; startTime: string; attendees: string[] }>)
+      : [];
 
-    const highlights: BriefingItem[] = (emailData?.messages ?? []).map((msg, i) => ({
-      id: `highlight_${i}`,
-      icon: i === 0 ? '✅' : '📬',
+    const briefing = this.buildBriefingFromLiveData(emails, events, emails.length);
+    const summary = this.formatBriefingSummary(briefing);
+    return { briefing, summary };
+  }
+
+  private buildBriefingFromLiveData(
+    emails: unknown[],
+    events: unknown[],
+    emailCount: number,
+  ): DailyBriefing {
+    const emailList = emails as Array<{ id: string; sender: string; subject: string; snippet: string }>;
+    const eventList = events as Array<{ id: string; title: string; startTime: string; attendees: string[] }>;
+
+    const highlights: BriefingItem[] = emailList.map((msg, i) => ({
+      id: msg.id ?? `highlight_${i}`,
+      icon: '📬',
       title: msg.subject,
-      description: `From: ${msg.from}`,
-      priority: i === 0 ? 'urgent' : 'medium',
+      description: `From: ${msg.sender}`,
+      priority: i === 0 ? 'high' : 'medium',
       source: 'gmail' as ToolName,
     }));
 
-    const meetings: BriefingItem[] = (calendarData?.events ?? []).map((evt, i) => ({
-      id: `meeting_${i}`,
-      icon: evt.updated ? '📅' : '🗓️',
+    const meetings: BriefingItem[] = eventList.map((evt, i) => ({
+      id: evt.id ?? `meeting_${i}`,
+      icon: '📅',
       title: evt.title,
-      priority: evt.updated ? 'high' : 'medium',
+      description: evt.startTime
+        ? new Date(evt.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : undefined,
+      priority: 'medium',
       source: 'calendar' as ToolName,
     }));
 
-    const followUps: BriefingItem[] = [
-      {
-        id: 'followup_1',
-        icon: '⚠️',
-        title: 'Recruiter follow-up due today',
-        priority: 'urgent',
-        source: 'gmail',
-      },
-    ];
-
-    const reports: BriefingItem[] = reportData
-      ? [{
-          id: 'report_1',
-          icon: '📄',
-          title: `${reportData.title} is ${reportData.status}`,
-          priority: 'medium',
-          source: 'sheets',
-        }]
-      : [];
-
     return {
       date: new Date().toISOString().split('T')[0],
-      emailCount: emailData?.count ?? 0,
+      emailCount,
       highlights,
       meetings,
-      followUps,
-      reports,
+      followUps: [],
+      reports: [],
     };
   }
 
-  private generateSuggestedActions(briefing: DailyBriefing): SuggestedAction[] {
+  private generateSuggestedActionsFromLiveData(briefing: DailyBriefing): SuggestedAction[] {
     const actions: SuggestedAction[] = [];
 
-    if (briefing.highlights.some((h) => h.title.toLowerCase().includes('recruiter'))) {
+    if (briefing.highlights.length > 0) {
+      const top = briefing.highlights[0];
       actions.push({
         id: uuidv4(),
-        label: 'Reply to Amazon recruiter',
-        description: 'Draft a response confirming availability',
+        label: `Reply to: ${top.title.slice(0, 40)}`,
+        description: top.description ?? 'Draft a response',
         action: 'send_email',
-        priority: 'urgent',
+        priority: 'high',
         tool: 'gmail',
       });
     }
 
-    if (briefing.meetings.some((m) => m.title.toLowerCase().includes('interview'))) {
+    if (briefing.meetings.length > 0) {
       actions.push({
         id: uuidv4(),
-        label: 'Confirm Thursday interview',
-        description: 'Send confirmation for the rescheduled interview',
+        label: `Prepare for: ${briefing.meetings[0].title}`,
+        description: 'Review meeting details and attendees',
         action: 'create_event',
-        priority: 'high',
-        tool: 'calendar',
-      });
-    }
-
-    if (briefing.reports.length > 0) {
-      actions.push({
-        id: uuidv4(),
-        label: 'Review and approve weekly report',
-        description: 'Weekly report is compiled and ready for your review',
-        action: 'update_sheet',
         priority: 'medium',
-        tool: 'sheets',
+        tool: 'calendar',
       });
     }
 
@@ -235,11 +199,9 @@ export class CoordinatorAgent extends BaseAgent {
 
   private formatBriefingSummary(briefing: DailyBriefing): string {
     const lines = [
-      `📬 ${briefing.emailCount} new emails`,
-      ...briefing.highlights.slice(0, 2).map((h) => `${h.icon} ${h.title}`),
-      ...briefing.meetings.filter((m) => m.title.includes('moved')).map((m) => `${m.icon} ${m.title}`),
-      ...briefing.reports.map((r) => `${r.icon} ${r.title}`),
-      ...briefing.followUps.map((f) => `${f.icon} ${f.title}`),
+      `📬 ${briefing.emailCount} unread email${briefing.emailCount !== 1 ? 's' : ''}`,
+      ...briefing.highlights.slice(0, 3).map((h) => `${h.icon} ${h.title}`),
+      ...briefing.meetings.slice(0, 3).map((m) => `${m.icon} ${m.title}${m.description ? ` (${m.description})` : ''}`),
     ];
     return lines.join('\n');
   }
@@ -251,10 +213,14 @@ export class EmailAgent extends BaseAgent {
   readonly role: AgentRole = 'email';
   readonly name = 'Email Agent';
 
+  constructor(private toolRegistry: ToolRegistry) {
+    super();
+  }
+
   async process(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const context = input.context as ToolContext;
     this.setStatus('working', 'Processing emails');
-    const result = await toolRegistry.execute('gmail', 'prioritize_inbox', {}, context);
+    const result = await this.toolRegistry.execute('gmail', 'get_unread_emails', {}, context);
     this.setStatus('idle');
     return { agent: this.role, result };
   }
@@ -264,10 +230,14 @@ export class CalendarAgent extends BaseAgent {
   readonly role: AgentRole = 'calendar';
   readonly name = 'Calendar Agent';
 
+  constructor(private toolRegistry: ToolRegistry) {
+    super();
+  }
+
   async process(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const context = input.context as ToolContext;
     this.setStatus('working', 'Checking calendar');
-    const result = await toolRegistry.execute('calendar', 'list_today', {}, context);
+    const result = await this.toolRegistry.execute('calendar', 'get_calendar_events', {}, context);
     this.setStatus('idle');
     return { agent: this.role, result };
   }
@@ -277,10 +247,14 @@ export class DocumentsAgent extends BaseAgent {
   readonly role: AgentRole = 'documents';
   readonly name = 'Documents Agent';
 
+  constructor(private toolRegistry: ToolRegistry) {
+    super();
+  }
+
   async process(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const context = input.context as ToolContext;
     this.setStatus('working', 'Scanning documents');
-    const result = await toolRegistry.execute('drive', 'list_recent', {}, context);
+    const result = await this.toolRegistry.execute('drive', 'list_recent', {}, context);
     this.setStatus('idle');
     return { agent: this.role, result };
   }
@@ -290,10 +264,14 @@ export class ReportingAgent extends BaseAgent {
   readonly role: AgentRole = 'reporting';
   readonly name = 'Reporting Agent';
 
+  constructor(private toolRegistry: ToolRegistry) {
+    super();
+  }
+
   async process(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const context = input.context as ToolContext;
     this.setStatus('working', 'Preparing reports');
-    const result = await toolRegistry.execute('sheets', 'get_report', {}, context);
+    const result = await this.toolRegistry.execute('sheets', 'get_report', {}, context);
     this.setStatus('idle');
     return { agent: this.role, result };
   }
@@ -303,21 +281,25 @@ export class SlackAgent extends BaseAgent {
   readonly role: AgentRole = 'slack';
   readonly name = 'Slack Agent';
 
+  constructor(private toolRegistry: ToolRegistry) {
+    super();
+  }
+
   async process(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const context = input.context as ToolContext;
     this.setStatus('working', 'Checking Slack');
-    const result = await toolRegistry.execute('slack', 'list_unread', {}, context);
+    const result = await this.toolRegistry.execute('slack', 'list_unread', {}, context);
     this.setStatus('idle');
     return { agent: this.role, result };
   }
 }
 
-export function createOrchestrator(): CoordinatorAgent {
-  const coordinator = new CoordinatorAgent();
-  coordinator.registerSpecialist(new EmailAgent());
-  coordinator.registerSpecialist(new CalendarAgent());
-  coordinator.registerSpecialist(new DocumentsAgent());
-  coordinator.registerSpecialist(new ReportingAgent());
-  coordinator.registerSpecialist(new SlackAgent());
+export function createOrchestrator(deps: OrchestratorDeps): CoordinatorAgent {
+  const coordinator = new CoordinatorAgent(deps);
+  coordinator.registerSpecialist(new EmailAgent(deps.toolRegistry));
+  coordinator.registerSpecialist(new CalendarAgent(deps.toolRegistry));
+  coordinator.registerSpecialist(new DocumentsAgent(deps.toolRegistry));
+  coordinator.registerSpecialist(new ReportingAgent(deps.toolRegistry));
+  coordinator.registerSpecialist(new SlackAgent(deps.toolRegistry));
   return coordinator;
 }
